@@ -86,6 +86,17 @@ FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 font = ImageFont.truetype(FONT_PATH, 16)  # Main data font
 font_small = ImageFont.truetype(FONT_PATH, 12)  # Header font
 
+# Load globe sprite sheet
+try:
+    globe_spritesheet = Image.open("earthspin-sheet.png")
+    GLOBE_FRAME_WIDTH = 48  # Each frame is 48x48 pixels
+    GLOBE_FRAME_HEIGHT = 48
+    GLOBE_FRAMES_PER_ROW = 10
+    GLOBE_TOTAL_FRAMES = 84  # Total frames in sprite sheet
+except Exception as e:
+    print(f"Failed to load globe sprite: {e}")
+    globe_spritesheet = None
+
 buttonA = digitalio.DigitalInOut(board.D23)
 buttonA.switch_to_input()
 
@@ -97,10 +108,17 @@ display_on = True
 buttonB_was_pressed = False
 buttonA_was_pressed = False
 
-# Animation state
-animation_active = False
-animation_frame = 0
-animation_complete = False
+# Display mode tracking
+display_mode = "pihole"  # "pihole", "system", or "globe"
+
+# Both buttons hold detection
+both_buttons_hold_start = None
+REBOOT_HOLD_DURATION = 2.0  # 2 seconds
+
+# Globe animation tracking
+globe_frame = 0
+globe_last_update = 0
+GLOBE_FRAME_DELAY = 0.1  # seconds between frames
 
 # Color palette - Dark brown and orange theme
 COLOR_BG = (25, 15, 5)  # Dark brown background
@@ -146,81 +164,6 @@ def draw_data_row(draw, font, label, value, y_pos, color):
     label_width = draw.textbbox((0, 0), label + ": ", font=font)[2]
     draw.text((x + label_width, y_pos), str(value), font=font, fill=COLOR_TEXT)
 
-def draw_animated_display(draw, font, frame, ip, ads_blocked, clients, cpu_temp):
-    """Draw the animated display with growing text"""
-    # Background
-    draw.rectangle((0, 0, CANVAS_WIDTH, CANVAS_HEIGHT), outline=0, fill=COLOR_BG)
-
-    # Phase 1: Data growing animation (frames 0-20)
-    if frame < 20:
-        # Calculate scale from 0.3 to 1.0
-        progress = frame / 20.0
-        scale = 0.3 + (progress * 0.7)
-        draw_static_display_scaled(draw, font, ip, ads_blocked, clients, cpu_temp, scale)
-
-    # Phase 2: Show static display at full size, still centered
-    else:
-        draw_static_display_scaled(draw, font, ip, ads_blocked, clients, cpu_temp, 1.0)
-
-def draw_static_display_scaled(draw, font, ip, ads_blocked, clients, cpu_temp, scale):
-    """Draw the static data display with scaling animation"""
-    # Temperature color
-    try:
-        temp_val = float(cpu_temp.replace('°C', ''))
-        temp_color = COLOR_WARN if temp_val > 60 else COLOR_ACCENT
-    except:
-        temp_color = COLOR_ACCENT
-
-    # Calculate center position
-    center_x = CANVAS_WIDTH // 2
-    center_y = CANVAS_HEIGHT // 2
-
-    # Scale font size
-    scaled_font_size = int(16 * scale)
-    scaled_font_small = int(12 * scale)
-
-    try:
-        scaled_font = ImageFont.truetype(FONT_PATH, max(scaled_font_size, 8))
-        scaled_font_header = ImageFont.truetype(FONT_PATH, max(scaled_font_small, 6))
-    except:
-        scaled_font = font
-        scaled_font_header = font_small
-
-    # Calculate positions based on scale
-    y_start = int(28 * scale) + int(center_y * (1 - scale))
-    line_height = int(28 * scale)
-    x_offset = int(8 * scale) + int(center_x * (1 - scale))
-
-    # Header - always centered
-    header_text = "SYSTEM MONITOR"
-    header_width = draw.textbbox((0, 0), header_text, font=scaled_font_header)[2]
-    header_x = center_x - header_width // 2
-    header_y = int(4 * scale) + int(center_y * (1 - scale) * 0.5)
-    draw.text((header_x, header_y), header_text, font=scaled_font_header, fill=COLOR_ACCENT)
-
-    # Draw data rows - always centered
-    data_items = [
-        ("IP ADDRESS", ip, COLOR_ACCENT),
-        ("ADS BLOCKED", str(ads_blocked), COLOR_ACCENT),
-        ("CLIENTS", str(clients), COLOR_ACCENT),
-        ("CPU TEMP", cpu_temp, temp_color)
-    ]
-
-    for i, (label, value, color) in enumerate(data_items):
-        y_pos = y_start + line_height * i
-        text = f"{label}: {value}"
-        text_width = draw.textbbox((0, 0), text, font=scaled_font)[2]
-        text_x = center_x - text_width // 2
-        draw.text((text_x, y_pos), text, font=scaled_font, fill=COLOR_TEXT)
-
-    # Border accents at full scale only
-    if scale >= 0.9:
-        draw_border_accent(draw)
-        # Center the header divider line
-        draw.line([(center_x - 100, int(22 * scale) + int(center_y * (1 - scale) * 0.5)),
-                   (center_x + 100, int(22 * scale) + int(center_y * (1 - scale) * 0.5))],
-                  fill=COLOR_ACCENT, width=1)
-
 def draw_static_display(draw, font, ip, ads_blocked, clients, cpu_temp):
     """Draw the static data display"""
     # Border accents
@@ -247,6 +190,95 @@ def draw_static_display(draw, font, ip, ads_blocked, clients, cpu_temp):
     draw_data_row(draw, font, "CLIENTS", str(clients), y_start + line_height * 2, COLOR_ACCENT)
     draw_data_row(draw, font, "CPU TEMP", cpu_temp, y_start + line_height * 3, temp_color)
 
+def get_system_stats():
+    """Gather system statistics: CPU, Memory, Disk, Uptime"""
+    stats = {}
+
+    try:
+        # CPU Usage - parse from top command
+        cmd = "top -bn1 | grep 'Cpu(s)' | sed 's/.*, *\\([0-9.]*\\)%* id.*/\\1/' | awk '{print 100 - $1\"%\"}'"
+        stats['cpu'] = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
+    except:
+        stats['cpu'] = "N/A"
+
+    try:
+        # Memory Usage - use free command
+        cmd = "free -m | awk 'NR==2{printf \"%.0f/%.0fMB (%.0f%%)\", $3,$2,$3*100/$2 }'"
+        stats['memory'] = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
+    except:
+        stats['memory'] = "N/A"
+
+    try:
+        # Disk Space - root partition
+        cmd = "df -h / | awk 'NR==2{printf \"%s/%s (%s)\", $3,$2,$5}'"
+        stats['disk'] = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
+    except:
+        stats['disk'] = "N/A"
+
+    try:
+        # Uptime - formatted
+        cmd = "uptime -p | sed 's/up //'"
+        stats['uptime'] = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
+    except:
+        stats['uptime'] = "N/A"
+
+    return stats
+
+def draw_system_stats_display(draw, font, stats):
+    """Draw the system stats display"""
+    # Border accents
+    draw_border_accent(draw)
+
+    # Header
+    draw.text((8, 4), "SYSTEM STATS", font=font_small, fill=COLOR_ACCENT)
+    draw.line([(5, 22), (CANVAS_WIDTH - 5, 22)], fill=COLOR_ACCENT, width=1)
+
+    # Data rows with better spacing
+    y_start = 28
+    line_height = 28
+
+    # Draw all system stats
+    draw_data_row(draw, font, "CPU USAGE", stats.get('cpu', 'N/A'), y_start, COLOR_ACCENT)
+    draw_data_row(draw, font, "MEMORY", stats.get('memory', 'N/A'), y_start + line_height, COLOR_ACCENT)
+    draw_data_row(draw, font, "DISK", stats.get('disk', 'N/A'), y_start + line_height * 2, COLOR_ACCENT)
+    draw_data_row(draw, font, "UPTIME", stats.get('uptime', 'N/A'), y_start + line_height * 3, COLOR_ACCENT)
+
+def draw_globe_animation(spritesheet, frame_number):
+    """Draw the spinning globe animation from sprite sheet"""
+    if spritesheet is None:
+        # Fallback: create error image
+        error_img = Image.new('RGB', (CANVAS_WIDTH, CANVAS_HEIGHT), COLOR_BG)
+        error_draw = ImageDraw.Draw(error_img)
+        error_draw.text((20, CANVAS_HEIGHT // 2), "Globe sprite not found", font=font, fill=COLOR_WARN)
+        return error_img, 0, 0
+
+    # Calculate which frame to extract from sprite sheet
+    row = frame_number // GLOBE_FRAMES_PER_ROW
+    col = frame_number % GLOBE_FRAMES_PER_ROW
+
+    # Extract the frame from sprite sheet
+    left = col * GLOBE_FRAME_WIDTH
+    top = row * GLOBE_FRAME_HEIGHT
+    right = left + GLOBE_FRAME_WIDTH
+    bottom = top + GLOBE_FRAME_HEIGHT
+
+    globe_frame = spritesheet.crop((left, top, right, bottom))
+
+    # Scale to fit display nicely (center it and make it large)
+    scale_factor = min(CANVAS_WIDTH, CANVAS_HEIGHT) / GLOBE_FRAME_WIDTH * 0.8
+    new_size = (int(GLOBE_FRAME_WIDTH * scale_factor), int(GLOBE_FRAME_HEIGHT * scale_factor))
+    globe_frame = globe_frame.resize(new_size, Image.Resampling.LANCZOS)
+
+    # Convert to RGB if needed
+    if globe_frame.mode != 'RGB':
+        globe_frame = globe_frame.convert('RGB')
+
+    # Calculate center position
+    x_pos = (CANVAS_WIDTH - new_size[0]) // 2
+    y_pos = (CANVAS_HEIGHT - new_size[1]) // 2
+
+    return globe_frame, x_pos, y_pos
+
 while True:
     # Check for button B press to toggle display on/off
     buttonB_is_pressed = not buttonB.value
@@ -255,14 +287,54 @@ while True:
         display_on = not display_on
     buttonB_was_pressed = buttonB_is_pressed
 
-    # Check for button A press to start animation
+    # Check for button A press to cycle pages
     buttonA_is_pressed = not buttonA.value
     if buttonA_is_pressed and not buttonA_was_pressed:
-        # Button A was just pressed - start animation
-        animation_active = True
-        animation_frame = 0
-        animation_complete = False
+        # Button A was just pressed - cycle to next page
+        if display_mode == "pihole":
+            display_mode = "system"
+        elif display_mode == "system":
+            display_mode = "globe"
+        else:  # globe
+            display_mode = "pihole"
+
+        # Reset globe animation frame when entering globe page
+        if display_mode == "globe":
+            globe_frame = 0
+            globe_last_update = time.time()
+
     buttonA_was_pressed = buttonA_is_pressed
+
+    # Check for both buttons held together for reboot
+    both_buttons_pressed = buttonA_is_pressed and buttonB_is_pressed
+    if both_buttons_pressed:
+        if both_buttons_hold_start is None:
+            # Just started holding both buttons
+            both_buttons_hold_start = time.time()
+        else:
+            # Check how long they've been held
+            hold_duration = time.time() - both_buttons_hold_start
+            if hold_duration >= REBOOT_HOLD_DURATION:
+                # Display reboot warning
+                draw.rectangle((0, 0, CANVAS_WIDTH, CANVAS_HEIGHT), outline=0, fill=COLOR_WARN)
+                reboot_msg = "REBOOTING..."
+                text_w = draw.textbbox((0, 0), reboot_msg, font=font)[2]
+                text_x = (CANVAS_WIDTH - text_w) // 2
+                text_y = CANVAS_HEIGHT // 2
+                draw.text((text_x, text_y), reboot_msg, font=font, fill=(255, 255, 255))
+                disp.image(image)
+                time.sleep(0.5)
+
+                # Execute reboot
+                try:
+                    subprocess.run(['sudo', 'reboot'], check=True)
+                except subprocess.CalledProcessError as e:
+                    print(f"Reboot failed: {e}")
+                except Exception as e:
+                    print(f"Reboot error: {e}")
+    else:
+        # Buttons released, reset hold timer
+        both_buttons_hold_start = None
 
     # If display is off, just show blank screen
     if not display_on:
@@ -271,80 +343,58 @@ while True:
         time.sleep(.1)
         continue
 
-    # Gather system stats
-    cmd = "hostname -I | cut -d' ' -f1"
-    IP = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
-    cmd = (
-        "cat /sys/class/thermal/thermal_zone0/temp | "
-        "awk '{printf \"%.1f°C\", $(NF-0) / 1000}'"
-    )
-    Temp = subprocess.check_output(cmd, shell=True).decode("utf-8")
-
-    # Pi Hole data
+    # Display appropriate page based on mode
     try:
-        r = requests.get(API_URL, timeout=5)
-        r.raise_for_status()
-        data = r.json()
-        ADSBLOCKED = data["queries"]["blocked"]
-        CLIENTS = data["clients"]["total"]
-    except (KeyError, requests.RequestException, json.JSONDecodeError):
-        ADSBLOCKED = "N/A"
-        CLIENTS = "N/A"
+        if display_mode == "pihole":
+            # Gather Pi-hole stats
+            cmd = "hostname -I | cut -d' ' -f1"
+            IP = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
+            cmd = (
+                "cat /sys/class/thermal/thermal_zone0/temp | "
+                "awk '{printf \"%.1f°C\", $(NF-0) / 1000}'"
+            )
+            Temp = subprocess.check_output(cmd, shell=True).decode("utf-8")
 
-    # Handle animation
-    try:
-        if animation_active:
-            draw_animated_display(draw, font, animation_frame, IP, ADSBLOCKED, CLIENTS, Temp)
-            animation_frame += 1
+            # Pi Hole data
+            try:
+                r = requests.get(API_URL, timeout=5)
+                r.raise_for_status()
+                data = r.json()
+                ADSBLOCKED = data["queries"]["blocked"]
+                CLIENTS = data["clients"]["total"]
+            except (KeyError, requests.RequestException, json.JSONDecodeError):
+                ADSBLOCKED = "N/A"
+                CLIENTS = "N/A"
 
-            # Animation completes at frame 20
-            if animation_frame >= 20:
-                animation_active = False
-                animation_complete = True
-        else:
-            # Static display when animation is complete or not started
-            if animation_complete:
-                # Show final static display
-                draw_animated_display(draw, font, 20, IP, ADSBLOCKED, CLIENTS, Temp)
-            else:
-                # Show a standby screen before first animation
-                draw.rectangle((0, 0, CANVAS_WIDTH, CANVAS_HEIGHT), outline=0, fill=COLOR_BG)
+            # Draw static Pi-hole stats
+            draw.rectangle((0, 0, CANVAS_WIDTH, CANVAS_HEIGHT), outline=0, fill=COLOR_BG)
+            draw_static_display(draw, font, IP, ADSBLOCKED, CLIENTS, Temp)
+            disp.image(image)
 
-                msg = "PRESS BTN A"
-                msg2 = "TO INITIALIZE"
-                text_w = draw.textbbox((0, 0), msg, font=font)[2]
-                text_w2 = draw.textbbox((0, 0), msg2, font=font)[2]
-                text_h = draw.textbbox((0, 0), msg, font=font)[3]
-                text_h2 = draw.textbbox((0, 0), msg2, font=font)[3]
+        elif display_mode == "system":
+            # Gather system stats
+            system_stats = get_system_stats()
 
-                # Calculate text position
-                text_x = (CANVAS_WIDTH - text_w) // 2
-                text_y = CANVAS_HEIGHT // 2 - 15
-                text2_y = CANVAS_HEIGHT // 2 + 10
+            # Draw static system stats
+            draw.rectangle((0, 0, CANVAS_WIDTH, CANVAS_HEIGHT), outline=0, fill=COLOR_BG)
+            draw_system_stats_display(draw, font, system_stats)
+            disp.image(image)
 
-                # Draw corner brackets around the text
-                bracket_len = 30
-                padding = 15
+        elif display_mode == "globe":
+            # Update globe animation frame
+            current_time = time.time()
+            if current_time - globe_last_update >= GLOBE_FRAME_DELAY:
+                globe_frame = (globe_frame + 1) % GLOBE_TOTAL_FRAMES
+                globe_last_update = current_time
 
-                # Top-left bracket
-                top_left_x = text_x - padding
-                top_left_y = text_y - padding
-                draw.line([(top_left_x, top_left_y), (top_left_x, top_left_y + bracket_len)], fill=COLOR_ACCENT, width=2)
-                draw.line([(top_left_x, top_left_y), (top_left_x + bracket_len, top_left_y)], fill=COLOR_ACCENT, width=2)
+            # Draw spinning globe
+            globe_img, x_pos, y_pos = draw_globe_animation(globe_spritesheet, globe_frame)
 
-                # Bottom-right bracket
-                bottom_right_x = text_x + max(text_w, text_w2) + padding
-                bottom_right_y = text2_y + text_h2 + padding
-                draw.line([(bottom_right_x, bottom_right_y), (bottom_right_x, bottom_right_y - bracket_len)], fill=COLOR_ACCENT, width=2)
-                draw.line([(bottom_right_x, bottom_right_y), (bottom_right_x - bracket_len, bottom_right_y)], fill=COLOR_ACCENT, width=2)
+            # Clear background and paste globe
+            draw.rectangle((0, 0, CANVAS_WIDTH, CANVAS_HEIGHT), outline=0, fill=(0, 0, 0))
+            image.paste(globe_img, (x_pos, y_pos))
+            disp.image(image)
 
-                # Blinking text effect
-                if int(time.time() * 2) % 2 == 0:
-                    draw.text((text_x, text_y), msg, font=font, fill=COLOR_ACCENT)
-                    draw.text(((CANVAS_WIDTH - text_w2) // 2, text2_y), msg2, font=font, fill=COLOR_TEXT)
-
-        # Display image
-        disp.image(image)
     except Exception as e:
         # Log error and continue
         print(f"Display error: {e}")

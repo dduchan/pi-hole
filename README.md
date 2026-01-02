@@ -1,10 +1,10 @@
 # Pi-hole Stats Display
 
-A customized system monitoring display for Raspberry Pi with an ST7789 LCD screen. This script displays real-time system statistics and Pi-hole metrics with a dark brown and orange command center aesthetic.
+A customized system monitoring display for Raspberry Pi with an ST7789 LCD screen. This script displays real-time system statistics, Pi-hole metrics, and a spinning globe animation with a dark brown and orange command center aesthetic.
 
 ## Overview
 
-This is a **modified version** of the original Adafruit Industries stats display example. The original code has been extensively customized with new visual themes, animations, and user interactions.
+This is a **modified version** of the original Adafruit Industries stats display example. The original code has been extensively customized with multiple display pages, system monitoring, animated globe visualization, and advanced button controls.
 
 **Original Authors**: Brent Rubell & Mikey Sklar (Adafruit Industries)
 **License**: MIT
@@ -18,41 +18,61 @@ This is a **modified version** of the original Adafruit Industries stats display
 
 ## Features
 
-### Display Information
-- **IP Address**: Local network IP
-- **Ads Blocked**: Total ads blocked by Pi-hole
-- **Clients**: Number of active clients
-- **CPU Temperature**: Real-time temperature with warning color (red if >60°C)
+### Three Display Pages
+
+**Page 1 - Pi-hole Stats:**
+- IP Address: Local network IP
+- Ads Blocked: Total ads blocked by Pi-hole
+- Clients: Number of active clients
+- CPU Temperature: Real-time temperature with warning color (red if >60°C)
+
+**Page 2 - System Stats:**
+- CPU Usage: Current CPU utilization percentage
+- Memory: RAM used/total with percentage
+- Disk Space: Root partition usage
+- Uptime: System uptime
+
+**Page 3 - Spinning Globe:**
+- Animated Earth visualization using sprite sheet
+- 84-frame continuous rotation animation
+- Centered display with black background
 
 ### Visual Theme
 - Dark brown background `(25, 15, 5)`
 - Orange accent colors `(255, 140, 0)`
-- Center-aligned layout
-- Border accent corners
-- Animated startup sequence
+- Center-aligned layout with border accent corners
+- Clean, static displays (no transition animations)
 
 ### Button Controls
-- **Button A (GPIO D23)**: Trigger animated data reveal
+- **Button A (GPIO D23)**: Cycle through pages (Pi-hole → System → Globe → Pi-hole)
 - **Button B (GPIO D24)**: Toggle display on/off
-
-### Animations
-- **Standby Screen**: Blinking "PRESS BTN A TO INITIALIZE" with corner brackets
-- **Startup Sequence**: Data grows from center (30% to 100% scale over ~2 seconds)
-- **Static Display**: Clean centered layout with all metrics
+- **Both Buttons (2s hold)**: Initiate system reboot with warning message
 
 ## Installation
 
 ### 1. Install Dependencies
 
 ```bash
-# Activate your virtual environment
-source pihole/bin/activate
+# For system-managed Python environments (Raspberry Pi OS Bookworm+)
+pip3 install --break-system-packages pillow adafruit-blinka adafruit-circuitpython-rgb-display requests
 
-# Install required packages
+# OR use a virtual environment (recommended)
+python3 -m venv pihole
+source pihole/bin/activate
 pip install pillow adafruit-blinka adafruit-circuitpython-rgb-display requests
 ```
 
-### 2. Configure Pi-hole API
+### 2. Globe Sprite Sheet
+
+Ensure `earthspin-sheet.png` is in the same directory as `stats.py`:
+- **Format**: PNG sprite sheet
+- **Dimensions**: 480x480 pixels
+- **Frame Size**: 48x48 pixels per frame
+- **Layout**: 10 columns × 10 rows (84 frames total)
+
+The script will display an error message on the globe page if the sprite sheet is not found.
+
+### 3. Configure Pi-hole API
 
 The script expects Pi-hole API to be available at:
 ```
@@ -64,7 +84,7 @@ If your Pi-hole is on a different host, modify the `API_URL` in `stats.py`:
 API_URL = "http://your-pihole-ip/api/stats/summary"
 ```
 
-### 3. Hardware Setup
+### 4. Hardware Setup
 
 Connect the ST7789 display:
 - **CS**: GPIO 17 (board.D17)
@@ -141,17 +161,24 @@ COLOR_WARN = (255, 50, 50)     # Red warning (high temp)
 
 ### Font Size
 
-Adjust font sizes (lines 86-87):
+Adjust font sizes (around line 86-87):
 ```python
 font = ImageFont.truetype(FONT_PATH, 16)       # Main data font
 font_small = ImageFont.truetype(FONT_PATH, 12) # Header font
 ```
 
-### Animation Speed
+### Globe Animation Speed
 
-Modify animation duration (line 203):
+Modify globe rotation speed (around line 110):
 ```python
-if frame < 20:  # Change 20 to adjust animation length
+GLOBE_FRAME_DELAY = 0.1  # Seconds between frames (0.1 = 10fps)
+```
+
+### Reboot Hold Duration
+
+Change the time required to hold both buttons for reboot (around line 105):
+```python
+REBOOT_HOLD_DURATION = 2.0  # Seconds (default: 2 seconds)
 ```
 
 ## Troubleshooting
@@ -175,17 +202,40 @@ if frame < 20:  # Change 20 to adjust animation length
 - Check all dependencies are installed
 - Verify font path exists: `/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf`
 - Run directly (not via nohup) to see error messages
+- Missing `digitalio` module: Install Adafruit Blinka library
+
+### Globe page shows error message
+- Verify `earthspin-sheet.png` exists in the same directory as `stats.py`
+- Check sprite sheet dimensions (should be 480x480 pixels)
+- Ensure sprite sheet is readable (correct permissions)
+
+### System stats show "N/A"
+- Commands may fail on non-Linux systems
+- Verify standard utilities are available: `top`, `free`, `df`, `uptime`
+- Check that script has permissions to run system commands
+
+### Reboot doesn't work
+- Script must run with sudo privileges for reboot command
+- Hold both buttons for full 2 seconds
+- Check system logs for permission errors
 
 ## Files
 
-- `stats.py` - Main display script
+- `stats.py` - Main display script with three-page cycling display
+- `earthspin-sheet.png` - Sprite sheet for spinning globe animation (480x480px, 84 frames)
 - `run_stats.sh` - Shell script to activate venv and run stats.py
 - `README.md` - This file
 
 ## Credits
 
 **Original Code**: Adafruit Industries (Brent Rubell & Mikey Sklar)
-**Modifications**: Custom animations, theming, button controls, centered layout
+
+**Modifications**:
+- Three-page display cycling system (Pi-hole stats, System stats, Spinning globe)
+- System monitoring integration (CPU, Memory, Disk, Uptime)
+- Animated globe visualization using sprite sheet
+- Advanced button controls (page cycling, reboot function)
+- Custom theming and centered layout design
 
 ## License
 
